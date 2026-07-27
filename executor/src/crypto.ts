@@ -133,9 +133,14 @@ export const INTENT_KEYS_ORDER: readonly (keyof IntentPayload)[] = [
 
 export function canonicalizeIntent(intent: IntentPayload): Uint8Array {
   const sorted: Record<string, unknown> = {};
-  for (const key of INTENT_KEYS_ORDER) {
+  
+  // Sort keys alphabetically to perfectly match Python's behavior
+  const keys = Object.keys(intent).sort() as Array<keyof IntentPayload>;
+  for (const key of keys) {
     sorted[key] = intent[key];
   }
+  
+  // Convert to a compact JSON string and encode as Uint8Array
   return new TextEncoder().encode(JSON.stringify(sorted));
 }
 
