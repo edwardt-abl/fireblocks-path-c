@@ -6,6 +6,8 @@ import { ALLOWLIST, buildCreateTransactionPayload } from './constructor.js';
 import {
   verifyEnvelope,
   type SignedEnvelope,
+  signFireblocksJwt,
+  loadFireblocksPrivateKey
 } from './crypto.js';
 import {
   createIntent,
@@ -156,7 +158,7 @@ function envelopeHandler(config: Config, logger: Logger, db: Database) {
       return;
     }
 
-    // 7. Submit (handles rate cap, idempotency, signing, Fireblocks call, audit, notify)
+    // 7. Submit
     const result = await submitConfirmedIntent(config, logger, db, envelope.intent.intentId);
     res.status(result.ok ? 200 : result.status).json({
       intentId: result.intentId,
@@ -167,9 +169,6 @@ function envelopeHandler(config: Config, logger: Logger, db: Database) {
   };
 }
 
-// POST /intent — called by the Mind during the confirmation step to pre-create the intent.
-// Two-step: Mind creates AWAITING_CONFIRMATION; Mind then sends the signed envelope
-// to /envelope, which moves it to CONFIRMED + SUBMITTING.
 function createIntentHandler(config: Config, logger: Logger, db: Database) {
   return async (req: Request, res: Response) => {
     const auth = req.header('Authorization') ?? '';
@@ -227,7 +226,6 @@ function createIntentHandler(config: Config, logger: Logger, db: Database) {
   };
 }
 
-// POST /intent/:id/confirm — Mind confirms; transitions to CONFIRMED.
 function confirmIntentHandler(config: Config, logger: Logger, db: Database) {
   return async (req: Request, res: Response) => {
     const intentId = req.params.id as string;
@@ -300,6 +298,76 @@ function statusHandler(config: Config, _logger: Logger, db: Database) {
   };
 }
 
+// POST /whoami — Allows the Mind AI to safely test the Fireblocks JWT layer without consuming a transaction rate limit event.
+function whoamiHandler(config: Config, logger: Logger) {
+  return async (_req: Request, res: Response) => {
+    try {
+      const apiKeyId = (process.env.FIREBLOCKS_API_KEY_ID || (config as any).FIREBLOCKS_API_KEY_ID) as string;
+      const privateKeyStr = (process.env.FIREBLOCKS_API_PRIVATE_KEY || (config as any).FIREBLOCKS_API_PRIVATE_KEY) as string;
+      const baseUrl = (process.env.FIREBLOCKS_BASE_URL || (config as any).FIREBLOCKS_BASE_URL || 'https://sandbox-api.fireblocks.io') as string;
+      
+      if (!apiKeyId || !privateKeyStr) {
+        res.status(500).json({ error: 'Missing FIREBLOCKS_API_KEY_ID or FIREBLOCKS_API_PRIVATE_KEY in env' });
+        return;
+      }
+
+      const privateKey = loadFireblocksPrivateKey(privateKeyStr);
+      const uri = '/v1/vault/accounts';
+      
+      const jwt = signFireblocksJwt({
+        apiKeyId,
+        privateKey,
+        method: 'GET',
+        bodyBytes: Buffer.alloc(0),
+        uri,
+      });
+
+      console.log("=== FIREBLOCKS DEBUG JWT ===", jwt);
+
+      const fbRes = await fetch(`${baseUrl}${uri}`, {
+        method: 'GET',
+        headers: {
+          'X-API-Key': apiKeyId,
+          'Authorization': `Bearer ${jwt}`,
+          'Accept': 'application/json'
+        }
+      });
+
+      const bodyText = await fbRes.text();
+      let parsedBody;
+      try {
+        parsedBody = JSON.parse(bodyText);
+      } catch {
+        parsedBody = bodyText;
+      }
+
+      const responseData = {
+        debug: 'isolated_auth_test',
+        request: {
+          url: `${baseUrl}${uri}`,
+          method: 'GET',
+          headers: {
+            'X-API-Key': apiKeyId,
+            'Authorization': `Bearer ${jwt}`
+          }
+        },
+        response: {
+          status: fbRes.status,
+          headers: Object.fromEntries(fbRes.headers.entries()),
+          body: parsedBody
+        }
+      };
+
+      console.log("=== FIREBLOCKS DEBUG RESPONSE ===", JSON.stringify(responseData.response, null, 2));
+
+      res.status(200).json(responseData);
+    } catch (err) {
+      console.error("=== FIREBLOCKS DEBUG ERROR ===", err);
+      res.status(500).json({ error: (err as Error).message });
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Server factory
 // ---------------------------------------------------------------------------
@@ -335,6 +403,7 @@ export function buildServer(config: Config, logger: Logger, db: Database) {
   app.post('/envelope', envelopeHandler(config, logger, db));
   app.post('/killswitch', killswitchHandler(config, logger, db));
   app.get('/status/:id', statusHandler(config, logger, db));
+  app.post('/whoami', whoamiHandler(config, logger)); // Debug Auth Layer
 
   app.use((_req, res) => {
     res.status(404).json({ error: 'not_found' });
