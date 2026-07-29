@@ -36,11 +36,14 @@ async function fireblocksRequest(
   bodyBytes: Buffer,
   idempotencyKey?: string
 ): Promise<FireblocksResponse> {
+  // Explicitly lock the buffer into a UTF-8 string so fetch doesn't mangle it
+  const bodyString = bodyBytes.length > 0 ? bodyBytes.toString('utf-8') : '';
+
   const jwt = signFireblocksJwt({
     apiKeyId: config.FIREBLOCKS_API_KEY_ID,
     privateKey,
     method,
-    bodyBytes,
+    bodyBytes, // Keep as buffer for the crypto layer
     uri: path,
   });
 
@@ -49,12 +52,13 @@ async function fireblocksRequest(
     'X-Fireblocks-Api-Key': config.FIREBLOCKS_API_KEY_ID,
   };
   if (idempotencyKey) headers['X-Idempotency-Key'] = idempotencyKey;
-  if (bodyBytes.length > 0) headers['Content-Type'] = 'application/json';
+  if (bodyString.length > 0) headers['Content-Type'] = 'application/json';
 
   const response = await fetch(`${config.FIREBLOCKS_BASE_URL}${path}`, {
     method,
     headers,
-    body: bodyBytes.length > 0 ? (bodyBytes as any) : undefined,
+    // Pass the strict string instead of the raw Buffer to ensure perfectly matched transmission
+    body: bodyString.length > 0 ? bodyString : undefined,
   });
 
   let body: any = null;
