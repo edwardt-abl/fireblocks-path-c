@@ -85,13 +85,13 @@ export function signFireblocksJwt(input: FireblocksJwtInput): string {
     nonce,
     bodyHash,
     uri: input.uri,
-    exp: nowSeconds + 30,
+    iat: nowSeconds,
+    exp: nowSeconds + 29,
   };
 
   return jwt.sign(payload, input.privateKey.pem, {
     algorithm: 'RS256',
     header: { kid: input.apiKeyId, alg: 'RS256', typ: 'JWT' },
-    noTimestamp: true,
   });
 }
 
