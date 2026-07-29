@@ -57,7 +57,6 @@ async function fireblocksRequest(
   const response = await fetch(`${config.FIREBLOCKS_BASE_URL}${path}`, {
     method,
     headers,
-    // Pass the strict string instead of the raw Buffer to ensure perfectly matched transmission
     body: bodyString.length > 0 ? bodyString : undefined,
   });
 
@@ -104,6 +103,7 @@ export interface SubmissionResult {
   fireblocksTxId: string | null;
   state: string;
   errorClass?: string;
+  validation?: any;
 }
 
 export async function submitConfirmedIntent(
@@ -299,6 +299,76 @@ export async function submitConfirmedIntent(
     };
   } finally {
     // Best-effort key hygiene
+    zeroBuffer(Buffer.from(privateKey.pem));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic Validation Path (Path A: POST /validate-envelope)
+// ---------------------------------------------------------------------------
+
+export async function validateConfirmedIntent(
+  config: Config,
+  logger: Logger,
+  db: Database,
+  intentId: string
+): Promise<SubmissionResult> {
+  const intent = getIntent(db, intentId);
+  if (!intent) {
+    return { ok: false, status: 404, intentId, fireblocksTxId: null, state: 'NOT_FOUND', errorClass: 'NOT_FOUND' };
+  }
+
+  let privateKey: LoadedFireblocksKey;
+  try {
+    privateKey = loadFireblocksPrivateKey(config.FIREBLOCKS_API_PRIVATE_KEY);
+  } catch (err) {
+    return { ok: false, status: 500, intentId, fireblocksTxId: null, state: 'SUBMIT_FAILED', errorClass: 'KEY_NOT_LOADED' };
+  }
+
+  const built = buildCreateTransactionPayload(intent);
+  const idemKey = `validate:${intent.payload_hash}`;
+
+  try {
+    // Send strictly to /v1/transactions/validate
+    const response = await fireblocksRequest(
+      config,
+      privateKey,
+      'POST',
+      '/v1/transactions/validate',
+      built.bodyBytes,
+      idemKey
+    );
+
+    if (response.status >= 200 && response.status < 300) {
+      return {
+        ok: true,
+        status: response.status,
+        intentId,
+        fireblocksTxId: null,
+        state: 'VALIDATION_SUCCESS',
+        validation: response.body,
+      };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      intentId,
+      fireblocksTxId: null,
+      state: 'VALIDATION_FAILED',
+      errorClass: classifyStatus(response.status),
+      validation: response.body,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 500,
+      intentId,
+      fireblocksTxId: null,
+      state: 'VALIDATION_ERROR',
+      errorClass: 'NETWORK_ERROR',
+    };
+  } finally {
     zeroBuffer(Buffer.from(privateKey.pem));
   }
 }

@@ -19,7 +19,7 @@ import {
 } from './persistence.js';
 import { appendAuditEvent } from './audit.js';
 import { notify } from './notify.js';
-import { submitConfirmedIntent, setKillSwitchWithNotify } from './executor.js';
+import { submitConfirmedIntent, validateConfirmedIntent, setKillSwitchWithNotify } from './executor.js';
 
 // ---------------------------------------------------------------------------
 // Allowlist enforcement
@@ -165,6 +165,83 @@ function envelopeHandler(config: Config, logger: Logger, db: Database) {
       state: result.state,
       fireblocksTxId: result.fireblocksTxId,
       errorClass: result.errorClass,
+    });
+  };
+}
+
+// Diagnostic handler for Option 3: POST /validate-envelope
+function validateEnvelopeHandler(config: Config, logger: Logger, db: Database) {
+  return async (req: Request, res: Response) => {
+    const envelope = req.body as SignedEnvelope;
+
+    if (!envelope || !envelope.intent || !envelope.signature || !envelope.nonce) {
+      res.status(400).json({ error: 'invalid_envelope_shape' });
+      return;
+    }
+
+    appendAuditEvent(db, {
+      eventType: 'envelope.received',
+      actor: 'executor',
+      intentId: envelope.intent.intentId,
+      metadata: { nonce: envelope.nonce, mode: 'diagnostic_validate' },
+    });
+
+    if (getDraftingDisabled(db)) {
+      res.status(423).json({ error: 'drafting_disabled' });
+      return;
+    }
+
+    if (!recordEnvelopeNonce(db, envelope.nonce)) {
+      res.status(409).json({ error: 'replay_detected' });
+      return;
+    }
+
+    try {
+      await verifyEnvelope(
+        envelope,
+        config.MIND_RELAY_PUBLIC_KEY,
+        config.ENVELOPE_REPLAY_WINDOW_SEC
+      );
+    } catch (err) {
+      res.status(401).json({ error: 'signature_invalid', reason: (err as Error).message });
+      return;
+    }
+
+    if (envelope.intent.operatorId !== config.OPERATOR_ID) {
+      res.status(403).json({ error: 'operator_not_authorized' });
+      return;
+    }
+    if (envelope.intent.conversationId !== config.CONVERSATION_ID) {
+      res.status(403).json({ error: 'conversation_not_authorized' });
+      return;
+    }
+
+    try {
+      assertAllowlist(envelope.intent);
+    } catch (err) {
+      res.status(422).json({ error: 'allowlist_violation', reason: (err as Error).message });
+      return;
+    }
+
+    const existing = getIntent(db, envelope.intent.intentId);
+    if (!existing) {
+      res.status(404).json({ error: 'intent_not_found' });
+      return;
+    }
+    if (existing.payload_hash !== envelope.intent.payloadHash) {
+      res.status(422).json({ error: 'payload_hash_mismatch' });
+      return;
+    }
+
+    // Forward strictly to /v1/transactions/validate
+    const result = await validateConfirmedIntent(config, logger, db, envelope.intent.intentId);
+    res.status(result.ok ? 200 : result.status).json({
+      ok: result.ok,
+      target: '/v1/transactions/validate',
+      status: result.status,
+      intentId: result.intentId,
+      errorClass: result.errorClass,
+      validation: result.validation,
     });
   };
 }
@@ -401,6 +478,7 @@ export function buildServer(config: Config, logger: Logger, db: Database) {
   app.post('/intent', createIntentHandler(config, logger, db));
   app.post('/intent/:id/confirm', confirmIntentHandler(config, logger, db));
   app.post('/envelope', envelopeHandler(config, logger, db));
+  app.post('/validate-envelope', validateEnvelopeHandler(config, logger, db)); // Path A diagnostic route
   app.post('/killswitch', killswitchHandler(config, logger, db));
   app.get('/status/:id', statusHandler(config, logger, db));
   app.post('/whoami', whoamiHandler(config, logger)); // Debug Auth Layer
