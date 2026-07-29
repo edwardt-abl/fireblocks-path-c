@@ -7,8 +7,8 @@ const ConfigSchema = z.object({
 
   FIREBLOCKS_API_KEY_ID: z.string().min(1, 'FIREBLOCKS_API_KEY_ID required'),
   FIREBLOCKS_API_PRIVATE_KEY: z.string().default(''), // intentionally optional until key ceremony
-  //FIREBLOCKS_BASE_URL: z.string().url().default('https://api.fireblocks.io'),
-  FIREBLOCKS_BASE_URL: z.string().url().default('https://sandbox-api.fireblocks.io'),
+  FIREBLOCKS_BASE_URL: z.string().url().default('https://api.fireblocks.io'),
+  //FIREBLOCKS_BASE_URL: z.string().url().default('https://sandbox-api.fireblocks.io'),
   FIREBLOCKS_ENVIRONMENT: z.enum(['TESTNET', 'PRODUCTION']).default('TESTNET'),
 
   MIND_RELAY_PUBLIC_KEY: z.string().min(1, 'MIND_RELAY_PUBLIC_KEY required (base64 Ed25519)'),
