@@ -312,7 +312,7 @@ function whoamiHandler(config: Config, logger: Logger) {
       }
 
       const privateKey = loadFireblocksPrivateKey(privateKeyStr);
-      const uri = '/v1/vault/accounts';
+      const uri = '/v1/vault/accounts_paged';
       
       const jwt = signFireblocksJwt({
         apiKeyId,
