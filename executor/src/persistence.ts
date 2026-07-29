@@ -116,17 +116,29 @@ export interface CreateIntentInput {
 export function createIntent(db: Database.Database, input: CreateIntentInput): IntentRow {
   const now = Math.floor(Date.now() / 1000);
   const intentId = uuidv4();
+
+  // 1. Construct the raw payload object with ALL required fields
+  const rawPayload: Record<string, any> = {
+    amount: input.amount,
+    assetId: input.assetId,
+    conversationId: input.conversationId,
+    destinationAddress: input.destinationAddress, // Match exact case of the incoming intent
+    note: input.note ?? '',
+    operatorId: input.operatorId,
+    sourceVaultId: input.sourceVaultId,
+  };
+
+  // 2. Sort keys alphabetically to create canonical JSON
+  const sortedKeys = Object.keys(rawPayload).sort();
+  const sortedPayload: Record<string, any> = {};
+  for (const key of sortedKeys) {
+    sortedPayload[key] = rawPayload[key];
+  }
+
+  // 3. Compact serialization and SHA-256 hash
   const payloadHash = crypto
     .createHash('sha256')
-    .update(
-      JSON.stringify({
-        sourceVaultId: input.sourceVaultId,
-        assetId: input.assetId,
-        destinationAddress: input.destinationAddress.toLowerCase(),
-        amount: input.amount,
-        note: input.note ?? '',
-      })
-    )
+    .update(JSON.stringify(sortedPayload))
     .digest('hex');
 
   db.prepare(
