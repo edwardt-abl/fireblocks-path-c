@@ -191,9 +191,10 @@ function validateEnvelopeHandler(config: Config, logger: Logger, db: Database) {
   };
 }
 
-// POST /whoami — SDK Authentication Diagnostic
-function whoamiHandler(config: Config, _logger: Logger) {
-  return async (_req: Request, res: Response) => {
+// POST /sdk-validate-envelope — SDK-native Direct Transaction Probe (Option A)
+function sdkValidateEnvelopeHandler(config: Config, _logger: Logger) {
+  return async (req: Request, res: Response) => {
+    let privateKeyPem = '';
     try {
       const apiKeyId = process.env.FIREBLOCKS_API_KEY_ID || config.FIREBLOCKS_API_KEY_ID;
       const privateKeyStr = process.env.FIREBLOCKS_API_PRIVATE_KEY || config.FIREBLOCKS_API_PRIVATE_KEY;
@@ -205,6 +206,71 @@ function whoamiHandler(config: Config, _logger: Logger) {
       }
 
       const privateKey = loadFireblocksPrivateKey(privateKeyStr);
+      privateKeyPem = privateKey.pem;
+      let basePath = baseUrl.trim().replace(/\/+$/, '');
+      if (!basePath.endsWith('/v1')) basePath += '/v1';
+
+      const fireblocks = new Fireblocks({
+        apiKey: apiKeyId,
+        secretKey: privateKey.pem,
+        basePath,
+      });
+
+      // Use provided request body or fallback to default allowlisted transaction body
+      const transactionRequest = (req.body && Object.keys(req.body).length > 0) ? req.body : {
+        assetId: ALLOWLIST.ASSET_ID,
+        source: { type: 'VAULT_ACCOUNT', id: ALLOWLIST.SOURCE_VAULT_ID },
+        destination: { type: 'ONE_TIME_ADDRESS', oneTimeAddress: { address: ALLOWLIST.DESTINATION_ADDRESS } },
+        amount: '1',
+        operation: 'TRANSFER',
+        note: 'SDK Direct Transaction Probe'
+      };
+
+      const idemKey = `sdk-probe-${Date.now()}`;
+      const response = await fireblocks.transactions.createTransaction({
+        transactionRequest,
+        idempotencyKey: idemKey,
+      });
+
+      res.status(200).json({
+        ok: true,
+        status: 200,
+        target: 'POST /v1/transactions (SDK)',
+        data: response.data,
+      });
+    } catch (err: any) {
+      const status = err?.response?.status || err?.status || 500;
+      const body = err?.response?.data || err?.message;
+      res.status(status).json({
+        ok: false,
+        status,
+        target: 'POST /v1/transactions (SDK)',
+        error: body,
+      });
+    } finally {
+      if (privateKeyPem) {
+        zeroBuffer(Buffer.from(privateKeyPem));
+      }
+    }
+  };
+}
+
+// POST /whoami — SDK Authentication Diagnostic
+function whoamiHandler(config: Config, _logger: Logger) {
+  return async (_req: Request, res: Response) => {
+    let privateKeyPem = '';
+    try {
+      const apiKeyId = process.env.FIREBLOCKS_API_KEY_ID || config.FIREBLOCKS_API_KEY_ID;
+      const privateKeyStr = process.env.FIREBLOCKS_API_PRIVATE_KEY || config.FIREBLOCKS_API_PRIVATE_KEY;
+      const baseUrl = process.env.FIREBLOCKS_BASE_URL || config.FIREBLOCKS_BASE_URL || 'https://api.fireblocks.io';
+
+      if (!apiKeyId || !privateKeyStr) {
+        res.status(500).json({ error: 'Missing FIREBLOCKS_API_KEY_ID or FIREBLOCKS_API_PRIVATE_KEY in env' });
+        return;
+      }
+
+      const privateKey = loadFireblocksPrivateKey(privateKeyStr);
+      privateKeyPem = privateKey.pem;
       let basePath = baseUrl.trim().replace(/\/+$/, '');
       if (!basePath.endsWith('/v1')) basePath += '/v1';
 
@@ -227,8 +293,6 @@ function whoamiHandler(config: Config, _logger: Logger) {
           body: vaultAccounts.data,
         }
       });
-
-      zeroBuffer(Buffer.from(privateKey.pem));
     } catch (err: any) {
       const status = err?.response?.status || err?.status || 500;
       const body = err?.response?.data || err?.message;
@@ -237,6 +301,10 @@ function whoamiHandler(config: Config, _logger: Logger) {
         error: body,
         status,
       });
+    } finally {
+      if (privateKeyPem) {
+        zeroBuffer(Buffer.from(privateKeyPem));
+      }
     }
   };
 }
@@ -258,6 +326,7 @@ export function buildServer(config: Config, logger: Logger, db: Database) {
   app.get('/health', healthHandler());
   app.post('/envelope', envelopeHandler(config, logger, db));
   app.post('/validate-envelope', validateEnvelopeHandler(config, logger, db));
+  app.post('/sdk-validate-envelope', sdkValidateEnvelopeHandler(config, logger));
   app.post('/whoami', whoamiHandler(config, logger));
 
   app.use((_req, res) => {
