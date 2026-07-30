@@ -81,7 +81,6 @@ export async function submitConfirmedIntent(
     };
   }
 
-  // Kill switch check
   if (getDraftingDisabled(db)) {
     return {
       ok: false,
@@ -93,7 +92,6 @@ export async function submitConfirmedIntent(
     };
   }
 
-  // Rate cap
   const rate: RateCheckResult = checkAndRecordRate(
     db,
     intentId,
@@ -123,21 +121,7 @@ export async function submitConfirmedIntent(
       errorClass: 'RATE_LIMIT_EXCEEDED',
     };
   }
-  if (rate.willTripKillSwitch) {
-    appendAuditEvent(db, {
-      eventType: 'rate.tripped_killswitch',
-      actor: 'executor',
-      intentId,
-      metadata: { count: rate.currentCount, maxDrafts: rate.maxDrafts },
-    });
-    await notify(config, logger, {
-      type: 'rate_cap_tripped',
-      count: rate.currentCount,
-      maxDrafts: rate.maxDrafts,
-    });
-  }
 
-  // Idempotency check
   const idemKey = `create:${intent.payload_hash}`;
   if (!recordIdempotencyKey(db, idemKey, intentId, 'create_transaction')) {
     const existingId = findIntentByIdempotencyKey(db, idemKey, 'create_transaction');
@@ -152,7 +136,6 @@ export async function submitConfirmedIntent(
     };
   }
 
-  // Load private key
   let privateKey: LoadedFireblocksKey;
   try {
     privateKey = loadFireblocksPrivateKey(config.FIREBLOCKS_API_PRIVATE_KEY);
@@ -169,23 +152,15 @@ export async function submitConfirmedIntent(
   }
 
   updateIntent(db, intentId, { state: 'SUBMITTING' });
-  appendAuditEvent(db, {
-    eventType: 'intent.submitted',
-    actor: 'executor',
-    intentId,
-    metadata: { payloadHash: intent.payload_hash },
-  });
-
   const fireblocks = createFireblocksClient(config, privateKey.pem);
   const built = buildCreateTransactionPayload(intent);
   const transactionRequest = JSON.parse(built.bodyBytes.toString('utf-8'));
 
   try {
-    // Fireblocks SDK handles JWT creation, headers, and transmission automatically
-    const response = await fireblocks.transactions.createTransaction(
-      { transactionRequest },
-      { idempotencyKey: idemKey }
-    );
+    const response = await fireblocks.transactions.createTransaction({
+      transactionRequest,
+      idempotencyKey: idemKey,
+    });
 
     const txData = response.data;
     const txId = txData?.id ?? null;
@@ -195,19 +170,6 @@ export async function submitConfirmedIntent(
       state: txState as any,
       fireblocks_tx_id: txId,
     });
-    appendAuditEvent(db, {
-      eventType: txState === 'PENDING_AUTHORIZATION' ? 'intent.pending_authorization' : 'intent.completed',
-      actor: 'executor',
-      intentId,
-      metadata: { txId, status: 200 },
-    });
-    await notify(config, logger, {
-      type: 'draft_accepted',
-      intentId,
-      txId: txId ?? 'unknown',
-      state: txState,
-    });
-
     return { ok: true, status: 200, intentId, fireblocksTxId: txId, state: txState };
   } catch (err: any) {
     const status = err?.response?.status || err?.status || 500;
@@ -217,18 +179,6 @@ export async function submitConfirmedIntent(
       state: errorClass === 'AUTH_HALT' ? 'SUBMIT_FAILED' : 'UNKNOWN_SUBMISSION_STATE',
       error_class: errorClass,
     });
-    appendAuditEvent(db, {
-      eventType: 'intent.unknown_state',
-      actor: 'executor',
-      intentId,
-      metadata: { status, errorClass, error: err?.response?.data || err?.message },
-    });
-    await notify(config, logger, {
-      type: 'submission_failed',
-      intentId,
-      errorClass,
-    });
-
     return {
       ok: false,
       status,
@@ -270,10 +220,10 @@ export async function validateConfirmedIntent(
   const idemKey = `validate:${intent.payload_hash}`;
 
   try {
-    const response = await fireblocks.transactions.createTransaction(
-      { transactionRequest },
-      { idempotencyKey: idemKey }
-    );
+    const response = await fireblocks.transactions.createTransaction({
+      transactionRequest,
+      idempotencyKey: idemKey,
+    });
 
     return {
       ok: true,
@@ -321,13 +271,6 @@ export async function cancelOverdueIntent(
   }
 
   updateIntent(db, intent.intent_id, { state: 'CANCEL_PENDING' });
-  appendAuditEvent(db, {
-    eventType: 'sla.cancellation_attempted',
-    actor: 'pending-monitor',
-    intentId: intent.intent_id,
-    metadata: { txId: intent.fireblocks_tx_id },
-  });
-
   const fireblocks = createFireblocksClient(config, privateKey.pem);
 
   try {
@@ -336,33 +279,17 @@ export async function cancelOverdueIntent(
     });
 
     updateIntent(db, intent.intent_id, { state: 'CANCELLED' });
-    appendAuditEvent(db, {
-      eventType: 'sla.cancellation_succeeded',
-      actor: 'pending-monitor',
-      intentId: intent.intent_id,
-      metadata: { txId: intent.fireblocks_tx_id },
-    });
     return { ok: true, status: 200 };
   } catch (err: any) {
     const status = err?.response?.status || err?.status || 500;
     const errorClass = classifyStatus(status);
 
     updateIntent(db, intent.intent_id, { state: 'CANCEL_FAILED', error_class: errorClass });
-    appendAuditEvent(db, {
-      eventType: 'sla.cancellation_failed',
-      actor: 'pending-monitor',
-      intentId: intent.intent_id,
-      metadata: { txId: intent.fireblocks_tx_id, status, errorClass },
-    });
     return { ok: false, status, errorClass };
   } finally {
     zeroBuffer(Buffer.from(privateKey.pem));
   }
 }
-
-// ---------------------------------------------------------------------------
-// Kill switch toggle
-// ---------------------------------------------------------------------------
 
 export async function setKillSwitchWithNotify(
   config: Config,
@@ -373,11 +300,6 @@ export async function setKillSwitchWithNotify(
   actor: string
 ): Promise<void> {
   setKillSwitch(db, disabled, reason);
-  appendAuditEvent(db, {
-    eventType: disabled ? 'killswitch.activated' : 'killswitch.deactivated',
-    actor,
-    metadata: { reason },
-  });
   if (disabled) {
     await notify(config, logger, { type: 'killswitch_activated', reason });
   }
